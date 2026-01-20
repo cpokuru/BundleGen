@@ -92,16 +92,25 @@
             ],
             "type": "bind"
         },
-       {
-            "source": "tmpfs",
+        {
+            "destination": "/rdklogs",
+            "type": "bind",
+            "source": "/rdklogs",
+            "options": [
+                "rbind",
+                "rw"
+	    ]
+        },
+        {
+            "source": "/tmp",
             "destination": "/tmp",
             "options": [
+                "rbind",
                 "nosuid",
-                "strictatime",
-                "mode=755",
-                "size=65536k"
+                "nodev",
+                "rw"
             ],
-            "type": "tmpfs"
+            "type": "bind"
         }
     ],
     "network": {
