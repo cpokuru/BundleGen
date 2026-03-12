@@ -23,7 +23,8 @@ class ImageUnpacker {
 public:
     ImageUnpacker(const std::string& src, const std::string& dst);
 
-    // Unpack the OCI image at src:<tag> into dst using umoci.
+    // Unpack the OCI image at src (tag taken from index.json) into dst.
+    // Natively extracts OCI layers using libarchive (or umoci if USE_SKOPEO_UMOCI=1).
     // If deleteAfter is true, removes src after unpacking.
     bool unpackImage(const std::string& tag, bool deleteAfter = false);
 
@@ -37,7 +38,9 @@ public:
     nlohmann::json getAppMetadataFromImg() const;
 
 private:
+#ifdef USE_SKOPEO_UMOCI
     bool umociFound;
+#endif
     std::string src;
     std::string dst;
     std::string appMetadataImagePath;

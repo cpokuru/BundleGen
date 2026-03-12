@@ -26,12 +26,16 @@ public:
     // Extract the image tag from a URL (e.g. docker://repo/name:tag → "tag")
     static std::string getImageTag(const std::string& url);
 
-    // Download an OCI image using skopeo to a temp directory.
+    // Download (or copy) an OCI image to a temp directory.
+    // For oci: URLs, performs a native recursive directory copy.
+    // For remote URLs (docker://, etc.) with USE_SKOPEO_UMOCI=1, uses skopeo.
     // Returns the destination path on success, empty string on failure.
     std::string downloadImage(const std::string& url,
                                const std::string& creds,
                                const nlohmann::json& platformCfg);
 
 private:
+#ifdef USE_SKOPEO_UMOCI
     bool skopeoFound;
+#endif
 };

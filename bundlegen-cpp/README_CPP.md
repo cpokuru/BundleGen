@@ -7,15 +7,15 @@ A C++17 port of the BundleGen Python tool for native deployment on RDK-B
 
 ## Overview
 
-BundleGen downloads OCI images using **skopeo**, unpacks them using **umoci**,
-then processes and modifies `config.json` for the **Dobby** container manager
-on RDK devices.
+BundleGen natively unpacks OCI images using **libarchive** and processes
+`config.json` for the **Dobby** container manager on RDK devices.
 
 This C++ version:
-- Compiles to a single static-linkable binary
-- Requires no Python runtime on the target device
+- Compiles to a single, self-contained binary
+- Requires **no Python runtime** and **no skopeo/umoci** on the target device
 - Cross-compiles cleanly with a Yocto/RDK-B toolchain
-- Uses only one external C++ dependency: **nlohmann/json** (header-only)
+- Natively handles `oci:` local image directories (OCI Image Layout)
+- Uses libarchive for tar/tar.gz/tar.zst/tar.xz layer extraction
 
 ---
 
@@ -25,9 +25,11 @@ This C++ version:
 |---------|---------|-------|
 | `g++ >= 7` | C++17 compiler | GCC 7+ or Clang 5+ |
 | `libssl-dev` | SHA256 for storage paths | OpenSSL dev headers |
+| `libarchive-dev` | OCI layer extraction | **Build-time dep; `libarchive.so` at runtime** |
 | `curl` | Downloading nlohmann/json | For `make deps` only |
-| `skopeo` | Downloading OCI images | Runtime dependency |
-| `umoci` | Unpacking OCI images | Runtime dependency |
+
+> **Runtime dependencies**: only `libarchive.so` (already present on RDK-B images).
+> `skopeo` and `umoci` are **not** needed on the device.
 
 ---
 
@@ -49,11 +51,14 @@ This fetches `json.hpp v3.11.3` into `include/nlohmann/json.hpp`.
 
 ```bash
 # Install build dependencies (Debian/Ubuntu)
-sudo apt-get install -y g++ libssl-dev curl
+sudo apt-get install -y g++ libssl-dev libarchive-dev curl
 
 # Clone the repo and enter the C++ directory
 git clone https://github.com/cpokuru/BundleGen
 cd BundleGen/bundlegen-cpp
+
+# Check that required libraries are available
+make deps-check
 
 # Download nlohmann/json header
 make deps
@@ -128,14 +133,14 @@ SRC_URI[jsonhpp.sha256sum] = "9bea4c8066ef4a1c206b2be5a35a7e7b32b17f58cd94c84e42
 SRCREV = "${AUTOREV}"
 S = "${WORKDIR}/git/bundlegen-cpp"
 
-DEPENDS = "openssl"
-RDEPENDS:${PN} = "skopeo umoci"
+DEPENDS = "openssl libarchive"
+RDEPENDS:${PN} = ""
 
 do_compile() {
     oe_runmake CROSS_COMPILE="${TARGET_PREFIX}" \
                SYSROOT="${STAGING_DIR_TARGET}" \
                CXXFLAGS="${CXXFLAGS}" \
-               LDFLAGS="${LDFLAGS}"
+               LDFLAGS="${LDFLAGS} -larchive"
 }
 
 do_install() {
@@ -204,8 +209,8 @@ bundlegen-cpp/
 │   ├── capabilities.h         # Default Linux capabilities
 │   ├── readelf.h              # readelf wrapper for API version detection
 │   ├── stb_platform.h         # Platform template loader
-│   ├── image_downloader.h     # skopeo wrapper
-│   ├── image_unpacker.h       # umoci wrapper
+│   ├── image_downloader.h     # OCI image copy (native) or skopeo wrapper
+│   ├── image_unpacker.h       # OCI unpacker (libarchive) or umoci wrapper
 │   ├── library_matching.h     # Host/rootfs library decision engine
 │   ├── bundle_processor.h     # Main OCI config processor
 │   └── nlohmann/
@@ -234,8 +239,10 @@ bundlegen-cpp/
 | `click` | `getopt_long` | Standard POSIX |
 | `hashlib.sha256` | `openssl/sha.h` | Links with `-lcrypto` |
 | `json` | `nlohmann/json` | Single header, MIT license |
-| `subprocess` | `popen()/pclose()` | POSIX standard |
+| `subprocess` | `popen()/pclose()` | POSIX standard (used for readelf/tar only) |
 | `os.walk` | `std::filesystem` | C++17 standard |
+| `skopeo` (subprocess) | `std::filesystem::copy` | Native OCI dir copy |
+| `umoci` (subprocess) | `libarchive` | Native OCI layer extraction |
 
 ---
 
@@ -243,6 +250,13 @@ bundlegen-cpp/
 
 ### `json.hpp: No such file or directory`
 Run `make deps` first to download the nlohmann/json header.
+
+### `archive.h: No such file or directory` or `cannot find -larchive`
+Install the libarchive development package:
+```bash
+sudo apt-get install -y libarchive-dev
+```
+In Yocto, add `DEPENDS = "libarchive"` to your recipe.
 
 ### Cross-compilation: `cannot find -lstdc++fs`
 On GCC < 9, `libstdc++fs` may be a separate library in the sysroot.  
@@ -255,12 +269,13 @@ SYSROOT/usr/lib/libstdc++fs.a
 ### Cross-compilation: `cannot find -lcrypto`
 Ensure OpenSSL is part of your sysroot. In Yocto, add `DEPENDS = "openssl"`.
 
-### `skopeo: command not found`
-skopeo must be installed on the **target** device.  
-Yocto: add `RDEPENDS:${PN} = "skopeo umoci"` to your recipe.
-
-### `umoci: command not found`
-Same as above — umoci must be installed on the target device.
+### Remote image pull not supported
+The native build only supports local `oci:` image sources.  
+To pull from a remote Docker registry, build with the legacy subprocess mode:
+```bash
+make USE_SKOPEO_UMOCI=1
+```
+This requires `skopeo` and `umoci` to be installed on the target device.
 
 ### Filesystem errors during build
 Ensure your build host has GCC 7+ and the `<filesystem>` header is available:
