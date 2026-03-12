@@ -22,23 +22,10 @@
 #include <ctime>
 #include <cstdlib>
 #include <sys/stat.h>
+#include <filesystem>
 
 // ─────────────────────────────────────────────────────────────────────────────
-ImageDownloader::ImageDownloader() : skopeoFound(true)
-{
-    auto [rc, out] = Utils::runProcessAndReturnOutput("which skopeo 2>/dev/null");
-    if (rc != 0 || out.empty()) {
-        LOG_ERROR("Failed to find skopeo binary to download images");
-        skopeoFound = false;
-    } else {
-        // Trim trailing newline
-        std::string path = out;
-        while (!path.empty() && (path.back() == '\n' || path.back() == '\r'))
-            path.pop_back();
-        LOG_DEBUG("Using skopeo: %s", path.c_str());
-    }
-}
-
+// getImageTag is shared by both native and legacy paths
 // ─────────────────────────────────────────────────────────────────────────────
 std::string ImageDownloader::getImageTag(const std::string& url)
 {
@@ -57,6 +44,24 @@ std::string ImageDownloader::getImageTag(const std::string& url)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+#ifdef USE_SKOPEO_UMOCI
+// ── Legacy skopeo-based implementation ────────────────────────────────────────
+
+ImageDownloader::ImageDownloader() : skopeoFound(true)
+{
+    auto [rc, out] = Utils::runProcessAndReturnOutput("which skopeo 2>/dev/null");
+    if (rc != 0 || out.empty()) {
+        LOG_ERROR("Failed to find skopeo binary to download images");
+        skopeoFound = false;
+    } else {
+        // Trim trailing newline
+        std::string path = out;
+        while (!path.empty() && (path.back() == '\n' || path.back() == '\r'))
+            path.pop_back();
+        LOG_DEBUG("Using skopeo: %s", path.c_str());
+    }
+}
+
 std::string ImageDownloader::downloadImage(const std::string& url,
                                             const std::string& creds,
                                             const nlohmann::json& platformCfg)
@@ -131,3 +136,76 @@ std::string ImageDownloader::downloadImage(const std::string& url,
     LOG_WARNING("Skopeo failed to download the image");
     return "";
 }
+
+#else  // USE_SKOPEO_UMOCI
+// ── Native filesystem-based implementation ────────────────────────────────────
+
+ImageDownloader::ImageDownloader()
+{
+    // No external tools required for native OCI directory copy
+}
+
+std::string ImageDownloader::downloadImage(const std::string& url,
+                                            const std::string& creds,
+                                            const nlohmann::json& platformCfg)
+{
+    (void)creds; // credentials are not needed for local oci: copies
+
+    if (!platformCfg.contains("arch")) {
+        LOG_ERROR("Platform architecture is not defined");
+        return "";
+    }
+
+    if (!platformCfg.contains("os")) {
+        LOG_ERROR("Platform OS is not defined");
+        return "";
+    }
+
+    // Only local oci: URLs are supported natively
+    if (url.size() < 4 || url.substr(0, 4) != "oci:") {
+        LOG_WARNING("Remote image pull (non-oci: URL '%s') is not supported natively. "
+                    "Build with USE_SKOPEO_UMOCI=1 to enable skopeo support.",
+                    url.c_str());
+        return "";
+    }
+
+    // Parse "oci:SRC:TAG" – strip leading "oci:" then strip trailing ":TAG"
+    std::string srcWithTag = url.substr(4);
+    std::string imageTag   = getImageTag(url);
+
+    std::string srcPath = srcWithTag;
+    if (!imageTag.empty() && srcPath.size() > imageTag.size() + 1) {
+        srcPath = srcPath.substr(0, srcPath.size() - imageTag.size() - 1);
+    }
+
+    // Ensure /tmp/bundlegen exists
+    std::error_code mkec;
+    std::filesystem::create_directories("/tmp/bundlegen", mkec);
+
+    // Generate timestamped destination path
+    time_t t = std::time(nullptr);
+    struct tm* tm_info = std::localtime(&t);
+    char timebuf[32];
+    std::strftime(timebuf, sizeof(timebuf), "%Y%m%d-%H%M%S", tm_info);
+
+    std::string destination = std::string("/tmp/bundlegen/") + timebuf + "_" + Utils::getRandomString(8);
+    LOG_INFO("Downloading image to %s...", destination.c_str());
+
+    // Native recursive copy of the OCI layout directory
+    std::error_code ec;
+    std::filesystem::copy(srcPath, destination,
+        std::filesystem::copy_options::recursive |
+        std::filesystem::copy_options::overwrite_existing, ec);
+
+    if (ec) {
+        LOG_WARNING("Failed to copy OCI image from %s to %s: %s",
+                    srcPath.c_str(), destination.c_str(), ec.message().c_str());
+        return "";
+    }
+
+    LOG_SUCCESS("Downloaded image from %s successfully to %s", url.c_str(), destination.c_str());
+    return destination;
+}
+
+#endif  // USE_SKOPEO_UMOCI
+

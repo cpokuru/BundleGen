@@ -15,6 +15,9 @@
 #
 #   Clean:
 #     make clean
+#
+#   Legacy skopeo/umoci fallback (subprocess-based):
+#     make USE_SKOPEO_UMOCI=1
 
 # ──────────────────────────────────────────────
 # Toolchain
@@ -56,13 +59,21 @@ OPTFLAGS        := -O2
 WARNFLAGS       := -Wall -Wextra -Wno-unused-parameter
 DEBUGFLAGS      ?=
 
+# Set USE_SKOPEO_UMOCI=1 to build with subprocess-based skopeo/umoci fallback
+USE_SKOPEO_UMOCI ?= 0
+
 CXXFLAGS        := $(CXXSTD) $(OPTFLAGS) $(WARNFLAGS) $(DEBUGFLAGS) \
                    $(SYSROOT_FLAGS) \
                    -I$(INCDIR) \
                    -I$(JSON_INCLUDE)
 
+ifeq ($(USE_SKOPEO_UMOCI),1)
+  CXXFLAGS += -DUSE_SKOPEO_UMOCI
+endif
+
 # -lstdc++fs required for GCC < 9; harmless on GCC >= 9
-LDFLAGS         := $(SYSROOT_FLAGS)  -lcrypto -lssl
+# -larchive required for native OCI layer extraction (libarchive-dev)
+LDFLAGS         := $(SYSROOT_FLAGS) -lcrypto -lssl -larchive
 
 # ──────────────────────────────────────────────
 # Sources & Objects
@@ -73,7 +84,7 @@ OBJS := $(patsubst $(SRCDIR)/%.cpp,$(OBJDIR)/%.o,$(SRCS))
 # ──────────────────────────────────────────────
 # Build targets
 # ──────────────────────────────────────────────
-.PHONY: all clean install uninstall strip deps help
+.PHONY: all clean install uninstall strip deps deps-check help
 
 all: $(TARGET)
 
@@ -109,12 +120,29 @@ deps:
 	     -o $(INCDIR)/nlohmann/json.hpp
 	@echo "Done. You can now run 'make'."
 
+deps-check:
+	@# Note: this check uses dpkg/pkg-config and is oriented towards Debian/Ubuntu.
+	@# On other distributions, check manually that libarchive-dev and libssl-dev are installed.
+	@echo "Checking build dependencies..."
+	@pkg-config --exists libarchive 2>/dev/null || \
+	  dpkg -s libarchive-dev >/dev/null 2>&1 || \
+	  { echo "ERROR: libarchive-dev is not installed."; \
+	    echo "  Install with: sudo apt-get install -y libarchive-dev"; exit 1; }
+	@echo "  libarchive-dev ... OK"
+	@pkg-config --exists openssl 2>/dev/null || \
+	  dpkg -s libssl-dev >/dev/null 2>&1 || \
+	  { echo "ERROR: libssl-dev is not installed."; \
+	    echo "  Install with: sudo apt-get install -y libssl-dev"; exit 1; }
+	@echo "  libssl-dev ....... OK"
+	@echo "All required build dependencies are present."
+
 help:
 	@echo "BundleGen C++ Makefile"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all         - Build bundlegen (default)"
 	@echo "  deps        - Download nlohmann/json single-header dependency"
+	@echo "  deps-check  - Check that libarchive-dev and libssl-dev are installed"
 	@echo "  clean       - Remove build artifacts"
 	@echo "  strip       - Strip debug symbols from binary"
 	@echo "  install     - Install to PREFIX (default: /usr/local)"
@@ -122,14 +150,22 @@ help:
 	@echo "  help        - Show this help"
 	@echo ""
 	@echo "Variables:"
-	@echo "  CROSS_COMPILE - Toolchain prefix (e.g. arm-rdk-linux-gnueabi-)"
-	@echo "  SYSROOT       - Sysroot for cross-compilation"
-	@echo "  PREFIX        - Install prefix (default: /usr/local)"
-	@echo "  DEBUGFLAGS    - Extra debug flags (e.g. -g -DDEBUG)"
+	@echo "  CROSS_COMPILE    - Toolchain prefix (e.g. arm-rdk-linux-gnueabi-)"
+	@echo "  SYSROOT          - Sysroot for cross-compilation"
+	@echo "  PREFIX           - Install prefix (default: /usr/local)"
+	@echo "  DEBUGFLAGS       - Extra debug flags (e.g. -g -DDEBUG)"
+	@echo "  USE_SKOPEO_UMOCI - Set to 1 to use skopeo/umoci subprocesses instead"
+	@echo "                     of the native libarchive implementation (default: 0)"
+	@echo ""
+	@echo "Build dependencies:"
+	@echo "  libarchive-dev   - Required for native OCI layer extraction"
+	@echo "  libssl-dev       - Required for SHA256 (storage paths)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make deps"
+	@echo "  make deps-check"
 	@echo "  make"
 	@echo "  make CROSS_COMPILE=arm-rdk-linux-gnueabi- SYSROOT=/opt/rdk/sysroot"
 	@echo "  make install PREFIX=/usr"
 	@echo "  make DEBUGFLAGS='-g -DDEBUG'"
+	@echo "  make USE_SKOPEO_UMOCI=1   # legacy skopeo/umoci subprocess mode"
