@@ -317,7 +317,7 @@ bool ImageUnpacker::unpackImage(const std::string& tag, bool deleteAfter)
         return false;
     }
 
-    // ── Step 3: copy config blob to dst/config.json ───────────────────────────
+    // ── Step 3: read OCI image config blob and translate to OCI Runtime Spec ────
     if (!manifestJson.contains("config") || !manifestJson["config"].contains("digest")) {
         LOG_ERROR("Manifest does not contain a config digest");
         return false;
@@ -325,6 +325,94 @@ bool ImageUnpacker::unpackImage(const std::string& tag, bool deleteAfter)
     std::string configDigest = manifestJson["config"]["digest"].get<std::string>();
     std::string configHash   = digestToHash(configDigest);
     std::string configBlob   = src + "/blobs/sha256/" + configHash;
+
+    std::ifstream configBlobFile(configBlob);
+    if (!configBlobFile) {
+        LOG_ERROR("Failed to open OCI image config blob: %s", configBlob.c_str());
+        return false;
+    }
+
+    nlohmann::json ociImageConfig;
+    try {
+        ociImageConfig = nlohmann::json::parse(configBlobFile);
+    } catch (const nlohmann::json::exception& e) {
+        LOG_ERROR("Failed to parse OCI image config blob: %s", e.what());
+        return false;
+    }
+
+    // Translate OCI image config fields into OCI Runtime Spec process section.
+    // The "config" sub-object in the image config blob holds Docker/OCI
+    // image-level fields (Entrypoint, Cmd, WorkingDir, Env, Tty, User).
+    const nlohmann::json& imgCfg = ociImageConfig.contains("config")
+                                       ? ociImageConfig["config"]
+                                       : nlohmann::json::object();
+
+    // process.cwd — from WorkingDir, default "/"
+    std::string cwd = "/";
+    if (imgCfg.contains("WorkingDir") && imgCfg["WorkingDir"].is_string()) {
+        std::string wd = imgCfg["WorkingDir"].get<std::string>();
+        if (!wd.empty())
+            cwd = wd;
+    }
+
+    // process.args — Entrypoint + Cmd concatenated; default ["/bin/sh"]
+    nlohmann::json args = nlohmann::json::array();
+    if (imgCfg.contains("Entrypoint") && imgCfg["Entrypoint"].is_array()) {
+        for (const auto& a : imgCfg["Entrypoint"])
+            args.push_back(a);
+    }
+    if (imgCfg.contains("Cmd") && imgCfg["Cmd"].is_array()) {
+        for (const auto& a : imgCfg["Cmd"])
+            args.push_back(a);
+    }
+    if (args.empty())
+        args.push_back("/bin/sh");
+
+    // process.env — from Env array (strings like "KEY=value")
+    nlohmann::json env = nlohmann::json::array();
+    if (imgCfg.contains("Env") && imgCfg["Env"].is_array()) {
+        for (const auto& e : imgCfg["Env"])
+            env.push_back(e);
+    }
+
+    // process.terminal — from Tty, default false
+    bool terminal = false;
+    if (imgCfg.contains("Tty") && imgCfg["Tty"].is_boolean())
+        terminal = imgCfg["Tty"].get<bool>();
+
+    // process.user — parse "uid:gid" or "username" from User field
+    int uid = 0, gid = 0;
+    if (imgCfg.contains("User") && imgCfg["User"].is_string()) {
+        std::string userStr = imgCfg["User"].get<std::string>();
+        auto colon = userStr.find(':');
+        if (colon != std::string::npos) {
+            try { uid = std::stoi(userStr.substr(0, colon)); }
+            catch (...) { LOG_WARNING("Non-numeric uid in User field '%s', defaulting to 0", userStr.c_str()); }
+            try { gid = std::stoi(userStr.substr(colon + 1)); }
+            catch (...) { LOG_WARNING("Non-numeric gid in User field '%s', defaulting to 0", userStr.c_str()); }
+        } else if (!userStr.empty()) {
+            try { uid = std::stoi(userStr); }
+            catch (...) { LOG_WARNING("Non-numeric User field '%s', defaulting uid to 0", userStr.c_str()); }
+        }
+    }
+
+    // Build the OCI Runtime Spec skeleton
+    nlohmann::json runtimeSpec = {
+        {"ociVersion", "1.0.2"},
+        {"process", {
+            {"terminal", terminal},
+            {"cwd", cwd},
+            {"args", args},
+            {"env", env},
+            {"user", {{"uid", uid}, {"gid", gid}}}
+        }},
+        {"root", {
+            {"path", "rootfs"},
+            {"readonly", false}
+        }},
+        {"mounts", nlohmann::json::array()},
+        {"linux", nlohmann::json::object()}
+    };
 
     std::error_code ec;
     fs::create_directories(dst, ec);
@@ -334,10 +422,15 @@ bool ImageUnpacker::unpackImage(const std::string& tag, bool deleteAfter)
         return false;
     }
 
-    fs::copy_file(configBlob, dst + "/config.json",
-                  fs::copy_options::overwrite_existing, ec);
-    if (ec) {
-        LOG_ERROR("Failed to copy config blob to config.json: %s", ec.message().c_str());
+    std::ofstream configOut(dst + "/config.json");
+    if (!configOut) {
+        LOG_ERROR("Failed to open config.json for writing in %s", dst.c_str());
+        return false;
+    }
+    configOut << runtimeSpec.dump(2);
+    configOut.close();
+    if (!configOut) {
+        LOG_ERROR("Failed to flush and close config.json in %s", dst.c_str());
         return false;
     }
 
