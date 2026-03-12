@@ -62,7 +62,7 @@ CXXFLAGS        := $(CXXSTD) $(OPTFLAGS) $(WARNFLAGS) $(DEBUGFLAGS) \
                    -I$(JSON_INCLUDE)
 
 # -lstdc++fs required for GCC < 9; harmless on GCC >= 9
-LDFLAGS         := $(SYSROOT_FLAGS) -lstdc++fs -lcrypto -lssl
+LDFLAGS         := $(SYSROOT_FLAGS)  -lcrypto -lssl
 
 # ──────────────────────────────────────────────
 # Sources & Objects
